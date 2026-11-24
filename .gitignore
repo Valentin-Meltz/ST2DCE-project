@@ -1,0 +1,36 @@
+# --- Secrets / local env ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+kubeconfig*
+
+# --- Node.js ---
+node_modules/
+npm-debug.log*
+coverage/
+test-results/
+
+# --- Terraform ---
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# --- Editors / OS ---
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# --- Course material (kept locally, not versioned) ---
+Project-requirement.pdf
