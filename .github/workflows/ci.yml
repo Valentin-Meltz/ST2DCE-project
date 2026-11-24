@@ -130,7 +130,7 @@ jobs:
       - name: Check that the container starts (non-root, read-only filesystem)
         run: |
           docker run --detach --name smoke --read-only --publish 3000:3000 "$IMAGE"
-          if ! curl --fail --silent --show-error --retry 10 --retry-connrefused --retry-delay 1 http://localhost:3000/health \
+          if ! curl --fail --silent --show-error --retry 10 --retry-all-errors --retry-delay 1 http://localhost:3000/health \
             | jq --exit-status --arg sha "$GITHUB_SHA" '.version == $sha'; then
             docker logs smoke
             exit 1
