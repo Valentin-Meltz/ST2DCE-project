@@ -1,0 +1,23 @@
+# Local development database only (the app runs with `npm run dev`).
+# Credentials come from app/.env (git-ignored), see .env.example.
+name: task-api-dev
+
+services:
+  postgres:
+    image: postgres:17.12-alpine
+    environment:
+      POSTGRES_USER: ${DB_USER:-taskapi}
+      POSTGRES_DB: ${DB_NAME:-taskapi}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in app/.env (copy .env.example)}
+    ports:
+      - "127.0.0.1:${DB_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  pgdata:
