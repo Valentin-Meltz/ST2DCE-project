@@ -1,6 +1,6 @@
-# Entry point: `kubectl apply -k k8s/`.
-# The namespace and the "task-api-db" Secret are infrastructure: they are created
-# before this (by hand for now, by Terraform in infra/ later). No secret is stored here.
+# Entry point: `kubectl apply -k k8s/` (run by infra/env.sh).
+# The namespace and the "task-api-db" Secret are infrastructure: Terraform creates
+# them before this (infra/main.tf). No secret is stored here.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
