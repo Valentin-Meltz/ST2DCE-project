@@ -1,0 +1,42 @@
+# Entry point: `kubectl apply -k k8s/`.
+# The namespace and the "task-api-db" Secret are infrastructure: they are created
+# before this (by hand for now, by Terraform in infra/ later). No secret is stored here.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: task-api
+
+resources:
+  - deployment.yaml
+  - service.yaml
+  - postgres.yaml
+
+# Generates the ConfigMap with a hash suffix in its name (task-api-config-<hash>).
+# Changing a value changes the name, which changes the Deployment and triggers a
+# rolling update. A plain ConfigMap would not restart the pods, which only read
+# their environment at startup.
+configMapGenerator:
+  - name: task-api-config
+    literals:
+      - SERVICE_NAME=task-api
+      - PORT=3000
+      - LOG_LEVEL=info
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=taskapi
+      - DB_USER=taskapi
+      - DB_SSL=false
+      - DB_POOL_MAX=10
+      # Keep serving 5 s after SIGTERM while the pod is removed from the Service.
+      - SHUTDOWN_DELAY_MS=5000
+      - SHUTDOWN_TIMEOUT_MS=10000
+      # Fault injection for incident drills, off by default.
+      - FAULT_ERROR_RATE=0
+      - FAULT_LATENCY_MS=0
+
+# Traceability: the deployed image tag is the full git commit SHA built by the CI.
+# To deploy another commit, change newTag (the CI will do it with
+# `kustomize edit set image ghcr.io/valentin-meltz/task-api:<sha>`).
+images:
+  - name: ghcr.io/valentin-meltz/task-api
+    newTag: 4ca1abf4b2fdb952037939b7deda320dc1ef2bb2

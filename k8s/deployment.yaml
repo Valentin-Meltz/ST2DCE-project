@@ -1,0 +1,91 @@
+# task-api: the stateless REST API, 2 replicas behind the "task-api" Service.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: task-api
+  labels:
+    app: task-api
+spec:
+  replicas: 2
+  # Old ReplicaSets are kept (scaled to 0) so `kubectl rollout undo` can go back to them.
+  revisionHistoryLimit: 10
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Start 1 extra pod, never go below 2 ready pods: an old pod is stopped only
+      # once a new one passes its readiness probe.
+      maxSurge: 1
+      maxUnavailable: 0
+  # A new pod must stay ready this long before the rollout continues.
+  minReadySeconds: 5
+  selector:
+    matchLabels:
+      app: task-api
+  template:
+    metadata:
+      labels:
+        app: task-api # must match spec.selector and the Service selector
+    spec:
+      # The app never calls the Kubernetes API.
+      automountServiceAccountToken: false
+      # Do not inject the legacy <SERVICE>_PORT/<SERVICE>_HOST variables.
+      enableServiceLinks: false
+      # SHUTDOWN_DELAY_MS (5 s) + SHUTDOWN_TIMEOUT_MS (10 s) + margin, then SIGKILL.
+      terminationGracePeriodSeconds: 20
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532 # the distroless "nonroot" user set in the Dockerfile
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: task-api
+          # The tag is the git commit SHA, set in kustomization.yaml (images:).
+          image: ghcr.io/valentin-meltz/task-api
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 3000
+          # Non-sensitive settings: every key of the ConfigMap becomes an env variable.
+          envFrom:
+            - configMapRef:
+                name: task-api-config
+          env:
+            # Sensitive setting: read from a Secret created outside Git.
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: task-api-db
+                  key: password
+          # Liveness: is the process alive? Fails -> the container is restarted.
+          # /health does not check the database on purpose.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          # Readiness: can it serve traffic? Fails -> removed from the Service, not restarted.
+          # /ready checks the database, the schema migration and the shutdown state.
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+          resources:
+            # Requests: reserved by the scheduler to place the pod.
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            # Limits: above the CPU limit the pod is throttled, above the memory limit it is OOMKilled.
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true # the app writes nothing to disk
+            capabilities:
+              drop: ["ALL"]
