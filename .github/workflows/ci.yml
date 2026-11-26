@@ -11,6 +11,7 @@ permissions:
 
 env:
   NODE_VERSION: "24"
+  TF_VERSION: "1.17.2"
   # Immutable tag: the commit SHA. No "latest" tag is ever pushed.
   IMAGE: ghcr.io/valentin-meltz/task-api:${{ github.sha }}
 
@@ -110,6 +111,39 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
 
+  terraform:
+    name: Terraform (fmt, validate, plan)
+    runs-on: ubuntu-24.04
+    env:
+      # Same environment name as the ephemeral-env job, so the plan shows what it creates.
+      ENV_NAME: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'main' }}
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          # Plain terraform binary, so `terraform output -raw` prints raw values.
+          terraform_wrapper: false
+      - name: Format
+        run: terraform fmt -check -recursive -diff
+      - name: Init (providers checked against the committed .terraform.lock.hcl)
+        run: terraform init -input=false -lockfile=readonly
+      - name: Validate
+        run: terraform validate
+      - name: Plan
+        run: |
+          terraform workspace select -or-create "$ENV_NAME"
+          terraform plan -input=false -no-color -out=tfplan
+          {
+            echo "### Terraform plan (environment \`$ENV_NAME\`)"
+            echo '```'
+            terraform show -no-color tfplan
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   image:
     name: Build, scan and push image
     needs: [lint, unit-tests, integration-tests, dependency-scan]
@@ -194,3 +228,30 @@ jobs:
           kubectl --namespace "$NAMESPACE" get all,pvc
           kubectl --namespace "$NAMESPACE" describe pods
           kubectl --namespace "$NAMESPACE" logs --selector 'app in (task-api,postgres)' --all-containers --prefix --tail=100
+
+  ephemeral-env:
+    name: Ephemeral environment (Terraform, create, test, destroy)
+    # Pull requests only: main is deployed by the deploy job above.
+    if: github.event_name == 'pull_request'
+    needs: terraform
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      ENV_NAME: pr-${{ github.event.pull_request.number }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+      # kind, kubectl, docker and jq are preinstalled on the ubuntu-24.04 runner.
+      - name: Create (kind cluster, namespace and Secret by Terraform, app built from this commit)
+        run: infra/env.sh up "$ENV_NAME"
+      - name: Smoke test through the Service
+        run: infra/env.sh test "$ENV_NAME"
+      - name: Show cluster state
+        if: failure()
+        run: infra/env.sh status "$ENV_NAME"
+      - name: Destroy (always, even when a step above failed or the run was cancelled)
+        if: always()
+        run: infra/env.sh down "$ENV_NAME"
