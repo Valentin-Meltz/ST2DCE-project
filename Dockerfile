@@ -5,7 +5,7 @@ COPY app/package.json app/package-lock.json ./
 RUN npm ci --omit=dev
 
 # Stage 2: minimal runtime image (Node.js only: no shell, no package manager, no npm).
-FROM gcr.io/distroless/nodejs24-debian13:nonroot@sha256:39b0407357c9fadf1a9708d22088f02de21f0e1e8a688474eea2d8701e7d5693
+FROM gcr.io/distroless/nodejs24-debian13:nonroot@sha256:675c532423b908f9e56f9d60a4e62309b63cd2a3175acb90a46b96f7ee68e121
 WORKDIR /app
 ENV NODE_ENV=production
 COPY --from=deps /app/node_modules ./node_modules
