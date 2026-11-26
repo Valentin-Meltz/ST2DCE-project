@@ -1,0 +1,16 @@
+# Stable name and IP in front of the task-api pods. Only pods that pass their
+# readiness probe receive traffic. Reachable in the cluster as http://task-api.
+apiVersion: v1
+kind: Service
+metadata:
+  name: task-api
+  labels:
+    app: task-api
+spec:
+  type: ClusterIP
+  selector:
+    app: task-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http # the containerPort named "http" (3000)
