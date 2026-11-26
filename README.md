@@ -38,7 +38,7 @@ Service "postgres" (headless) --> StatefulSet "postgres" (1 pod) --> PVC data-po
 | --------------------------- | ----------------------------------------------------------------------------------------- |
 | Deployment, Service         | `k8s/deployment.yaml`, `k8s/service.yaml`, `k8s/postgres.yaml`                            |
 | ConfigMap                   | `configMapGenerator` in `k8s/kustomization.yaml` (a change triggers a rolling update)     |
-| Secret                      | `task-api-db`, created outside Git (below; by Terraform later). Never committed           |
+| Secret                      | `task-api-db`, created by Terraform (`infra/main.tf`) with a generated password. Never committed |
 | Liveness / readiness probes | `/health` (no DB check, restart on failure) and `/ready` (DB check, removed from Service) |
 | Requests and limits         | Both containers                                                                           |
 | 2 replicas, rolling update  | `replicas: 2`, `maxSurge: 1`, `maxUnavailable: 0`: never fewer than 2 ready pods          |
@@ -46,39 +46,96 @@ Service "postgres" (headless) --> StatefulSet "postgres" (1 pod) --> PVC data-po
 | Hardening                   | Non-root, read-only root filesystem, no capabilities, no service account token            |
 | Traceability                | Image tag = full commit SHA (`images:` in `kustomization.yaml`), `kubernetes.io/change-cause` annotation, `/health` and `app_info` show the SHA |
 
-### Deploy locally (kind)
+### Deploy locally
 
-Prerequisites: Docker, [kind](https://kind.sigs.k8s.io/), kubectl ≥ 1.27. The image is public on GHCR, so
-no pull secret is needed.
+Prerequisites: Docker, [kind](https://kind.sigs.k8s.io/), kubectl, Terraform ≥ 1.10, curl and jq.
+The cluster, the namespace and the Secret come from Terraform (see [Infrastructure as Code](#infrastructure-as-code-terraform));
+`infra/env.sh` chains Terraform, the image build and `kubectl apply -k k8s/`.
 
 ```bash
-kind create cluster --name st2dce                  # switches kubectl to the kind-st2dce context
-kubectl create namespace task-api
-kubectl -n task-api create secret generic task-api-db --from-literal=password="$(openssl rand -hex 24)"
+infra/env.sh up dev      # cluster st2dce-dev + namespace + Secret, image built from the working tree, deploy, wait
+infra/env.sh test dev    # smoke test: /ready, version in /health = deployed commit, write and read a task
 
-kubectl apply -k k8s/
-kubectl -n task-api rollout status statefulset/postgres
-kubectl -n task-api rollout status deployment/task-api
-kubectl -n task-api annotate deployment/task-api --overwrite \
-  kubernetes.io/change-cause="deploy $(awk '/^ *newTag:/ {print $2}' k8s/kustomization.yaml)"
-
-kubectl -n task-api port-forward svc/task-api 8080:80   # then http://localhost:8080/tasks
+export KUBECONFIG="$(terraform -chdir=infra output -raw kubeconfig_path)"   # this cluster only
+kubectl -n task-api port-forward svc/task-api 8080:80                          # then http://localhost:8080/tasks
 ```
+
+The kubeconfig is a separate file (`infra/kubeconfig-st2dce-dev`, gitignored): `~/.kube/config` and its
+current context are never changed.
 
 ### Deploy a new version, roll back
 
-1. Merge to `main`: the CI pushes `ghcr.io/valentin-meltz/task-api:<commit-sha>`.
-2. Set `newTag` in `k8s/kustomization.yaml` to that SHA, then run `kubectl apply -k k8s/` and the
-   `annotate` command above. The annotation is what `kubectl rollout history` shows.
+1. Commit, then run `infra/env.sh up dev` again. Terraform has nothing to change, the image is rebuilt
+   with the new commit SHA as tag and `kubectl apply` starts a rolling update. Uncommitted changes in
+   `app/` give a `<sha>-dirty` tag, so `/health` never claims a commit it does not run.
+2. On `main`, the CI pushes `ghcr.io/valentin-meltz/task-api:<commit-sha>`. To deploy that exact image,
+   set `newTag` in `k8s/kustomization.yaml` and run `kubectl apply -k k8s/`, then
+   `kubectl -n task-api annotate deployment/task-api --overwrite kubernetes.io/change-cause="deploy <sha>"`.
+   The annotation is what `kubectl rollout history` shows.
 3. To roll back: `kubectl -n task-api rollout undo deployment/task-api` (or `--to-revision=<n>`).
 
 ### Destroy
 
 ```bash
-kind delete cluster --name st2dce        # removes everything, including the database volume
-# or, keeping the cluster:
-kubectl delete namespace task-api        # also deletes the PVC, which `kubectl delete -k k8s/` keeps
+infra/env.sh down dev    # terraform destroy (cluster, database volume included) + delete the workspace
 ```
+
+## Infrastructure as Code (Terraform)
+
+### What Terraform manages
+
+```
+infra/ (Terraform, one workspace = one environment)        k8s/ (Kustomize, applied by infra/env.sh)
+  kind_cluster "st2dce-<env>" --> kubeconfig file             Deployment, Services, StatefulSet,
+  kubernetes_namespace_v1 "task-api" (Pod Security: restricted)  ConfigMap
+  random_password --> kubernetes_secret_v1 "task-api-db"  <-- read by the app and PostgreSQL
+```
+
+| File                       | Content                                                                                       |
+| -------------------------- | --------------------------------------------------------------------------------------------- |
+| `infra/versions.tf`        | Terraform and provider versions (`tehcyx/kind`, `hashicorp/kubernetes`, `hashicorp/random`), backend |
+| `infra/main.tf`            | Cluster, namespace, password and Secret. The kubernetes provider uses the certificates of the new cluster, never a kubeconfig context |
+| `infra/variables.tf`       | `cluster_name_prefix`, `node_image` (Kubernetes version, pinned by digest), `worker_nodes`, `namespace` |
+| `infra/outputs.tf`         | `environment`, `cluster_name`, `kube_context`, `kubeconfig_path`, `api_endpoint`, `namespace`, `db_secret_name` |
+| `infra/.terraform.lock.hcl`| Exact provider versions and checksums (Linux, macOS, Windows), committed                      |
+| `infra/env.sh`             | Ephemeral environment lifecycle: `up`, `test`, `status`, `down`                               |
+
+Variables can be overridden without editing the code, for example `TF_VAR_worker_nodes=2 infra/env.sh up dev`.
+kind cannot modify a cluster: changing `node_image` or `worker_nodes` on an existing environment
+replaces the cluster (the plan shows `-/+`), and the database with it.
+
+### Terraform state
+
+The state uses the **local backend, one workspace per environment**:
+`infra/terraform.tfstate.d/<env>/terraform.tfstate`. The workspace name is the environment name
+(`dev`, `pr-12`…) and gives the cluster name (`st2dce-<env>`), so several environments can exist side by
+side, each with its own state.
+
+- **Why local.** A kind cluster only exists on the machine (or CI runner) that created it. A remote state
+  would describe a cluster nobody else can reach. The state is created and deleted with the cluster:
+  `infra/env.sh down` destroys the resources, then deletes the workspace.
+- **It holds secrets.** The state contains the database password and the cluster admin key. It is
+  gitignored (`*.tfstate`, `kubeconfig*`), never uploaded as a CI artifact, and the CI creates and
+  destroys an environment in the same job, so the state never leaves the runner.
+- **For a shared cloud cluster**, switch to the remote backend shown in `infra/versions.tf` (S3 with
+  `use_lockfile` for locking; GCS and azurerm work the same way): the team and the pipeline then share one
+  state, and `terraform plan` shows the real drift.
+- **One owner per resource.** The namespace and the Secret belong to Terraform: create or delete them
+  only through `infra/env.sh` / Terraform, never with `kubectl create|delete namespace`.
+
+### In the pipeline
+
+| Job              | When              | What it does                                                                              |
+| ---------------- | ----------------- | ----------------------------------------------------------------------------------------- |
+| `terraform`      | Every PR and push | `fmt -check`, `init -lockfile=readonly`, `validate`, `plan` of the environment (`pr-<n>` or `main`); the plan is shown in the job summary |
+| `ephemeral-env`  | Every PR          | `infra/env.sh up pr-<n>` (image built in the job and loaded into kind, no registry), smoke test, `status` on failure, `down` with `if: always()` so the environment is destroyed even when a step fails or the run is cancelled |
+| `deploy`         | Push to `main`    | Deploys the image pushed to GHCR to a throwaway kind cluster and smoke-tests it            |
+
+### Troubleshooting
+
+- `infra/env.sh status <env>` shows nodes, resources, rollout history, events and logs.
+- A cluster deleted outside Terraform (`kind delete cluster`, Docker reset) is detected by
+  `infra/env.sh down`, which removes it from the state instead of failing, then cleans up.
 
 ## Hybrid and multi-cloud
 
