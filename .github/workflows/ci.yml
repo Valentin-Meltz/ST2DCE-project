@@ -154,3 +154,43 @@ jobs:
           else
             docker push "$IMAGE"
           fi
+
+  deploy:
+    name: Deploy to Kubernetes (ephemeral kind cluster)
+    needs: image
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    env:
+      NAMESPACE: task-api
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Create kind cluster
+        run: kind create cluster --name ci --wait 120s
+      - name: Create the namespace and the database Secret (random password, never stored in git)
+        run: |
+          kubectl create namespace "$NAMESPACE"
+          kubectl --namespace "$NAMESPACE" create secret generic task-api-db \
+            --from-literal=password="$(openssl rand -hex 24)"
+      - name: Deploy the image of this commit
+        working-directory: k8s
+        run: |
+          kustomize edit set image "$IMAGE"
+          kubectl apply --kustomize .
+          kubectl --namespace "$NAMESPACE" annotate deployment/task-api --overwrite \
+            kubernetes.io/change-cause="deploy $GITHUB_SHA"
+          kubectl --namespace "$NAMESPACE" rollout status statefulset/postgres --timeout=180s
+          kubectl --namespace "$NAMESPACE" rollout status deployment/task-api --timeout=180s
+      - name: Smoke test through the Service
+        run: |
+          kubectl --namespace "$NAMESPACE" port-forward service/task-api 8080:80 &
+          curl --fail --silent --show-error --retry 10 --retry-all-errors --retry-delay 2 http://localhost:8080/ready
+          curl --fail --silent --show-error http://localhost:8080/health \
+            | jq --exit-status --arg sha "$GITHUB_SHA" '.version == $sha'
+          curl --fail --silent --show-error -X POST http://localhost:8080/tasks \
+            -H 'content-type: application/json' -d '{"title":"smoke test"}'
+      - name: Show cluster state
+        if: failure()
+        run: |
+          kubectl --namespace "$NAMESPACE" get all,pvc
+          kubectl --namespace "$NAMESPACE" describe pods
+          kubectl --namespace "$NAMESPACE" logs --selector 'app in (task-api,postgres)' --all-containers --prefix --tail=100
